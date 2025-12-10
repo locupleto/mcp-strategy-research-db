@@ -1,0 +1,2 @@
+# MCP Server
+mcp>=1.23.1
