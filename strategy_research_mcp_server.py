@@ -411,6 +411,40 @@ async def list_tools() -> list[Tool]:
                 "required": ["query"]
             }
         ),
+
+        # Timing Mode Comparison Tool
+        Tool(
+            name="compare_timing_modes",
+            description="Compare strategy performance between Conservative (T+1 Open entry) and Aggressive (same-day Close entry) timing modes. Shows side-by-side comparison with delta calculations for each metric.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "run_id": {
+                        "type": "string",
+                        "description": "Optional run ID to filter (shows all runs if not specified)"
+                    },
+                    "strategy_id": {
+                        "type": "string",
+                        "description": "Optional specific strategy to compare. If not provided, shows top strategies with biggest timing impact."
+                    },
+                    "sort_by": {
+                        "type": "string",
+                        "description": "Sort by: 'expectancy_delta' (biggest change), 'cons_expectancy', 'aggr_expectancy', 'win_rate_delta'",
+                        "default": "expectancy_delta"
+                    },
+                    "min_trades_per_year": {
+                        "type": "number",
+                        "description": "Minimum median trades per year (applies to both timings)",
+                        "default": 5
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Number of strategies to return (default: 20)",
+                        "default": 20
+                    }
+                }
+            }
+        ),
     ]
 
 
@@ -446,6 +480,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             return await handle_get_signal_performance_summary(arguments)
         elif name == "run_custom_query":
             return await handle_run_custom_query(arguments)
+        elif name == "compare_timing_modes":
+            return await handle_compare_timing_modes(arguments)
         else:
             return [TextContent(type="text", text=f"Unknown tool: {name}")]
     except Exception as e:
@@ -1507,6 +1543,181 @@ async def handle_run_custom_query(arguments: dict[str, Any]) -> list[TextContent
         return [TextContent(type="text", text="\n".join(lines))]
     except sqlite3.Error as e:
         return [TextContent(type="text", text=f"SQL Error: {str(e)}")]
+    finally:
+        conn.close()
+
+
+async def handle_compare_timing_modes(arguments: dict[str, Any]) -> list[TextContent]:
+    """Compare Conservative vs Aggressive timing modes side-by-side."""
+    run_id = arguments.get("run_id")
+    strategy_id = arguments.get("strategy_id")
+    sort_by = arguments.get("sort_by", "expectancy_delta")
+    min_trades_per_year = arguments.get("min_trades_per_year", 5)
+    limit = arguments.get("limit", 20)
+
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+
+        # If specific strategy is requested
+        if strategy_id:
+            query = """
+                SELECT
+                    cons.strategy_id,
+                    s.buy_signals,
+                    s.sell_signals,
+                    sr.period_name,
+                    -- Conservative metrics
+                    cons.median_expectancy as cons_expectancy,
+                    cons.median_win_rate as cons_win_rate,
+                    cons.median_profit_factor as cons_profit_factor,
+                    cons.median_avg_trades_per_year as cons_trades_per_year,
+                    cons.median_calmar_ratio as cons_calmar,
+                    cons.median_alpha as cons_alpha,
+                    cons.consistency_score as cons_consistency,
+                    -- Aggressive metrics
+                    aggr.median_expectancy as aggr_expectancy,
+                    aggr.median_win_rate as aggr_win_rate,
+                    aggr.median_profit_factor as aggr_profit_factor,
+                    aggr.median_avg_trades_per_year as aggr_trades_per_year,
+                    aggr.median_calmar_ratio as aggr_calmar,
+                    aggr.median_alpha as aggr_alpha,
+                    aggr.consistency_score as aggr_consistency
+                FROM aggregated_results cons
+                JOIN aggregated_results aggr ON cons.strategy_id = aggr.strategy_id
+                    AND cons.search_run_id = aggr.search_run_id
+                JOIN strategies s ON cons.strategy_id = s.strategy_id
+                JOIN search_runs sr ON cons.search_run_id = sr.id
+                WHERE cons.trade_timing = 'conservative'
+                  AND aggr.trade_timing = 'aggressive'
+                  AND cons.strategy_id = ?
+                ORDER BY sr.period_name
+            """
+            params = [strategy_id]
+            if run_id:
+                query = query.replace("ORDER BY sr.period_name", "AND cons.search_run_id = ? ORDER BY sr.period_name")
+                params.append(run_id)
+
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+
+            if not rows:
+                return [TextContent(type="text", text=f"No timing comparison data found for strategy: {strategy_id}")]
+
+            lines = [
+                f"Timing Mode Comparison: {strategy_id}",
+                "=" * 100,
+                "",
+            ]
+
+            for row in rows:
+                buy_signals = json.loads(row['buy_signals']) if row['buy_signals'] else []
+                sell_signals = json.loads(row['sell_signals']) if row['sell_signals'] else []
+
+                exp_delta = (row['aggr_expectancy'] or 0) - (row['cons_expectancy'] or 0)
+                wr_delta = (row['aggr_win_rate'] or 0) - (row['cons_win_rate'] or 0)
+                calmar_delta = (row['aggr_calmar'] or 0) - (row['cons_calmar'] or 0)
+
+                lines.append(f"Period: {row['period_name'] or 'Custom'}")
+                lines.append(f"  BUY:  {' + '.join(buy_signals)}")
+                lines.append(f"  SELL: {' + '.join(sell_signals)}")
+                lines.append("")
+                lines.append(f"  {'Metric':<20} {'CONS':>12} {'AGGR':>12} {'Delta':>12}")
+                lines.append(f"  {'-'*56}")
+                lines.append(f"  {'Expectancy':<20} {format_pct(row['cons_expectancy']):>12} {format_pct(row['aggr_expectancy']):>12} {exp_delta:>+11.2f}%")
+                lines.append(f"  {'Win Rate':<20} {format_pct(row['cons_win_rate']):>12} {format_pct(row['aggr_win_rate']):>12} {wr_delta:>+11.2f}%")
+                lines.append(f"  {'Profit Factor':<20} {format_number(row['cons_profit_factor']):>12} {format_number(row['aggr_profit_factor']):>12}")
+                lines.append(f"  {'Calmar Ratio':<20} {format_number(row['cons_calmar']):>12} {format_number(row['aggr_calmar']):>12} {calmar_delta:>+11.2f}")
+                lines.append(f"  {'Alpha vs B&H':<20} {format_pct(row['cons_alpha']):>12} {format_pct(row['aggr_alpha']):>12}")
+                lines.append(f"  {'Trades/Year':<20} {format_number(row['cons_trades_per_year']):>12} {format_number(row['aggr_trades_per_year']):>12}")
+                lines.append(f"  {'Consistency':<20} {format_pct(row['cons_consistency'], 0):>12} {format_pct(row['aggr_consistency'], 0):>12}")
+                lines.append("")
+
+            return [TextContent(type="text", text="\n".join(lines))]
+
+        # Otherwise, find strategies with biggest timing impact
+        else:
+            run_filter = "AND cons.search_run_id = ?" if run_id else ""
+
+            # Determine sort expression
+            sort_expressions = {
+                'expectancy_delta': 'ABS(aggr.median_expectancy - cons.median_expectancy) DESC',
+                'cons_expectancy': 'cons.median_expectancy DESC',
+                'aggr_expectancy': 'aggr.median_expectancy DESC',
+                'win_rate_delta': 'ABS(aggr.median_win_rate - cons.median_win_rate) DESC',
+            }
+            sort_expr = sort_expressions.get(sort_by, sort_expressions['expectancy_delta'])
+
+            query = f"""
+                SELECT
+                    cons.strategy_id,
+                    s.buy_signals,
+                    s.sell_signals,
+                    sr.period_name,
+                    cons.median_expectancy as cons_expectancy,
+                    cons.median_win_rate as cons_win_rate,
+                    cons.median_profit_factor as cons_profit_factor,
+                    cons.median_avg_trades_per_year as cons_trades_per_year,
+                    cons.median_calmar_ratio as cons_calmar,
+                    cons.consistency_score as cons_consistency,
+                    aggr.median_expectancy as aggr_expectancy,
+                    aggr.median_win_rate as aggr_win_rate,
+                    aggr.median_profit_factor as aggr_profit_factor,
+                    aggr.median_avg_trades_per_year as aggr_trades_per_year,
+                    aggr.median_calmar_ratio as aggr_calmar,
+                    aggr.consistency_score as aggr_consistency,
+                    (aggr.median_expectancy - cons.median_expectancy) as expectancy_delta,
+                    (aggr.median_win_rate - cons.median_win_rate) as win_rate_delta
+                FROM aggregated_results cons
+                JOIN aggregated_results aggr ON cons.strategy_id = aggr.strategy_id
+                    AND cons.search_run_id = aggr.search_run_id
+                JOIN strategies s ON cons.strategy_id = s.strategy_id
+                JOIN search_runs sr ON cons.search_run_id = sr.id
+                WHERE cons.trade_timing = 'conservative'
+                  AND aggr.trade_timing = 'aggressive'
+                  AND (cons.median_avg_trades_per_year >= ? OR cons.median_avg_trades_per_year IS NULL)
+                  AND (aggr.median_avg_trades_per_year >= ? OR aggr.median_avg_trades_per_year IS NULL)
+                  {run_filter}
+                ORDER BY {sort_expr}
+                LIMIT ?
+            """
+
+            params = [min_trades_per_year, min_trades_per_year]
+            if run_id:
+                params.append(run_id)
+            params.append(limit)
+
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+
+            if not rows:
+                return [TextContent(type="text", text="No timing comparison data found. Ensure both timing modes are in the database.")]
+
+            lines = [
+                f"Timing Mode Comparison (sorted by {sort_by})",
+                "=" * 100,
+                f"Min trades/year: {min_trades_per_year}",
+                "",
+                f"{'#':<3} {'Period':<25} {'CONS Exp':>10} {'AGGR Exp':>10} {'Delta':>10} {'CONS WR':>9} {'AGGR WR':>9}",
+                "-" * 100,
+            ]
+
+            for i, row in enumerate(rows, 1):
+                buy_signals = json.loads(row['buy_signals']) if row['buy_signals'] else []
+                sell_signals = json.loads(row['sell_signals']) if row['sell_signals'] else []
+
+                exp_delta = row['expectancy_delta'] or 0
+                delta_str = f"{exp_delta:>+9.2f}%" if exp_delta != 0 else "     0.00%"
+
+                lines.append("")
+                lines.append(f"#{i:<2} [{row['period_name'] or 'Custom'}]")
+                lines.append(f"    BUY:  {' + '.join(buy_signals)}")
+                lines.append(f"    SELL: {' + '.join(sell_signals)}")
+                lines.append(f"    CONS: Exp {format_pct(row['cons_expectancy']):>8} | WR {format_pct(row['cons_win_rate']):>6} | PF {format_number(row['cons_profit_factor']):>5} | Calmar {format_number(row['cons_calmar']):>5}")
+                lines.append(f"    AGGR: Exp {format_pct(row['aggr_expectancy']):>8} | WR {format_pct(row['aggr_win_rate']):>6} | PF {format_number(row['aggr_profit_factor']):>5} | Calmar {format_number(row['aggr_calmar']):>5}")
+                lines.append(f"    Delta: Expectancy {delta_str} | Win Rate {(row['win_rate_delta'] or 0):>+.1f}%")
+
+            return [TextContent(type="text", text="\n".join(lines))]
     finally:
         conn.close()
 
