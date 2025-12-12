@@ -42,10 +42,17 @@ def get_connection() -> sqlite3.Connection:
 
 
 def format_pct(value: Optional[float], decimals: int = 2) -> str:
-    """Format a percentage value for display."""
+    """Format a percentage value for display (value is already in percentage form, e.g., 50.0 for 50%)."""
     if value is None:
         return "N/A"
     return f"{value:.{decimals}f}%"
+
+
+def format_ratio_as_pct(value: Optional[float], decimals: int = 0) -> str:
+    """Format a ratio (0.0-1.0) as a percentage for display."""
+    if value is None:
+        return "N/A"
+    return f"{value * 100:.{decimals}f}%"
 
 
 def format_number(value: Optional[float], decimals: int = 2) -> str:
@@ -118,7 +125,7 @@ async def list_tools() -> list[Tool]:
                     },
                     "sort_by": {
                         "type": "string",
-                        "description": "Metric to sort by: median_expectancy, median_win_rate, median_profit_factor, median_calmar_ratio, median_alpha, consistency_score",
+                        "description": "Metric to sort by: median_expectancy, median_win_rate, median_profit_factor, median_calmar_ratio, median_alpha, median_risk_adjusted_alpha, consistency_score",
                         "default": "median_expectancy"
                     },
                     "limit": {
@@ -393,14 +400,45 @@ async def list_tools() -> list[Tool]:
             }
         ),
         Tool(
+            name="get_schema",
+            description="Get the database schema showing all tables, their columns, and data types. Essential for understanding the database structure before writing custom queries.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table_name": {
+                        "type": "string",
+                        "description": "Optional: specific table name to get schema for. If not provided, returns schema for all tables."
+                    }
+                }
+            }
+        ),
+        Tool(
+            name="list_strategy_ids",
+            description="List strategy IDs in the database with optional pattern filtering. Use this to discover valid strategy IDs before using other tools that require a strategy_id parameter. Strategy IDs follow the format: buy_signal1+signal2__sell_signal1+signal2",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "Optional: filter strategy IDs containing this pattern (case-insensitive). E.g., 'momentum_rising' to find all strategies using that signal."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum results to return (default: 50)",
+                        "default": 50
+                    }
+                }
+            }
+        ),
+        Tool(
             name="run_custom_query",
-            description="Execute a custom SQL query against the strategy database. For advanced users who need specific analysis not covered by other tools.",
+            description="Execute a custom SQL query against the strategy database. For advanced users who need specific analysis not covered by other tools. Supports SELECT queries and PRAGMA commands for schema inspection.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "SQL SELECT query to execute (read-only)"
+                        "description": "SQL SELECT query or PRAGMA command to execute (read-only)"
                     },
                     "limit": {
                         "type": "integer",
@@ -445,6 +483,69 @@ async def list_tools() -> list[Tool]:
                 }
             }
         ),
+
+        # Capital Deployment Analysis Tool
+        Tool(
+            name="get_capital_deployment_analysis",
+            description="Analyze portfolio-level capital deployment for a strategy. Shows estimated simultaneous positions, time-in-market stats, and compares two strategies side-by-side across market periods. Useful for understanding how much capital a strategy keeps deployed.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "strategy_id": {
+                        "type": "string",
+                        "description": "Primary strategy ID to analyze"
+                    },
+                    "compare_strategy_id": {
+                        "type": "string",
+                        "description": "Optional second strategy ID for side-by-side comparison"
+                    },
+                    "trade_timing": {
+                        "type": "string",
+                        "description": "Filter by timing: 'conservative' or 'aggressive'",
+                        "default": "conservative"
+                    },
+                    "run_id": {
+                        "type": "string",
+                        "description": "Optional run ID to filter to a specific period"
+                    }
+                },
+                "required": ["strategy_id"]
+            }
+        ),
+
+        # Daily Position Count Tool (for time-series graphs)
+        Tool(
+            name="get_daily_position_counts",
+            description="Get daily position counts for a strategy across all symbols. Returns time-series data showing how many positions were open each trading day - perfect for graphing capital deployment over time. Requires trade-level data (available for runs after Dec 2025).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "strategy_id": {
+                        "type": "string",
+                        "description": "Strategy ID to analyze"
+                    },
+                    "run_id": {
+                        "type": "string",
+                        "description": "Filter by specific run ID (required to get consistent date range)"
+                    },
+                    "trade_timing": {
+                        "type": "string",
+                        "description": "Filter by timing: 'conservative' or 'aggressive'",
+                        "default": "conservative"
+                    },
+                    "compare_strategy_id": {
+                        "type": "string",
+                        "description": "Optional second strategy for side-by-side comparison"
+                    },
+                    "output_format": {
+                        "type": "string",
+                        "description": "Output format: 'summary' (stats only), 'daily' (full time-series), 'weekly' (aggregated by week)",
+                        "default": "summary"
+                    }
+                },
+                "required": ["strategy_id", "run_id"]
+            }
+        ),
     ]
 
 
@@ -478,10 +579,18 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             return await handle_get_strategy_symbol_breakdown(arguments)
         elif name == "get_signal_performance_summary":
             return await handle_get_signal_performance_summary(arguments)
+        elif name == "get_schema":
+            return await handle_get_schema(arguments)
+        elif name == "list_strategy_ids":
+            return await handle_list_strategy_ids(arguments)
         elif name == "run_custom_query":
             return await handle_run_custom_query(arguments)
         elif name == "compare_timing_modes":
             return await handle_compare_timing_modes(arguments)
+        elif name == "get_capital_deployment_analysis":
+            return await handle_get_capital_deployment_analysis(arguments)
+        elif name == "get_daily_position_counts":
+            return await handle_get_daily_position_counts(arguments)
         else:
             return [TextContent(type="text", text=f"Unknown tool: {name}")]
     except Exception as e:
@@ -707,7 +816,7 @@ async def handle_get_top_strategies(arguments: dict[str, Any]) -> list[TextConte
     valid_sort_cols = [
         'median_expectancy', 'median_win_rate', 'median_profit_factor',
         'consistency_score', 'median_calmar_ratio', 'median_alpha',
-        'median_annualized_return', 'symbols_beating_benchmark'
+        'median_risk_adjusted_alpha', 'median_annualized_return', 'symbols_beating_benchmark'
     ]
     if sort_by not in valid_sort_cols:
         sort_by = 'median_expectancy'
@@ -729,6 +838,7 @@ async def handle_get_top_strategies(arguments: dict[str, Any]) -> list[TextConte
                 ar.median_annualized_return,
                 ar.median_calmar_ratio,
                 ar.median_alpha,
+                ar.median_risk_adjusted_alpha,
                 ar.symbols_beating_benchmark,
                 ar.symbols_tested,
                 ar.symbols_profitable,
@@ -787,7 +897,7 @@ async def handle_get_top_strategies(arguments: dict[str, Any]) -> list[TextConte
             lines.append(
                 f"  Max DD: {format_pct(row['median_max_drawdown_pct'])} | "
                 f"Time in Mkt: {format_pct(row['median_time_in_market_pct'])} | "
-                f"Consistency: {format_pct(row['consistency_score'], 0) if row['consistency_score'] else 'N/A'}"
+                f"Consistency: {format_ratio_as_pct(row['consistency_score']) if row['consistency_score'] else 'N/A'}"
             )
             if row['median_annualized_return'] is not None:
                 beat_pct = (row['symbols_beating_benchmark'] / row['symbols_tested'] * 100) if row['symbols_tested'] else 0
@@ -796,9 +906,16 @@ async def handle_get_top_strategies(arguments: dict[str, Any]) -> list[TextConte
                     f"Calmar: {format_number(row['median_calmar_ratio'])} | "
                     f"Alpha: {format_pct(row['median_alpha'])}"
                 )
-                lines.append(
-                    f"  Beat B&H: {row['symbols_beating_benchmark'] or 0}/{row['symbols_tested']} ({beat_pct:.0f}%)"
-                )
+                risk_adj_alpha = row['median_risk_adjusted_alpha'] if 'median_risk_adjusted_alpha' in row.keys() else None
+                if risk_adj_alpha is not None:
+                    lines.append(
+                        f"  Risk-Adj Alpha: {format_pct(risk_adj_alpha)} | "
+                        f"Beat B&H: {row['symbols_beating_benchmark'] or 0}/{row['symbols_tested']} ({beat_pct:.0f}%)"
+                    )
+                else:
+                    lines.append(
+                        f"  Beat B&H: {row['symbols_beating_benchmark'] or 0}/{row['symbols_tested']} ({beat_pct:.0f}%)"
+                    )
             lines.append("")
 
         return [TextContent(type="text", text="\n".join(lines))]
@@ -821,7 +938,23 @@ async def handle_get_strategy_details(arguments: dict[str, Any]) -> list[TextCon
         strategy_row = cursor.fetchone()
 
         if not strategy_row:
-            return [TextContent(type="text", text=f"Strategy not found: {strategy_id}")]
+            # Try to suggest similar strategies
+            cursor.execute("""
+                SELECT strategy_id FROM strategies
+                WHERE strategy_id LIKE ?
+                LIMIT 5
+            """, (f"%{strategy_id.split('__')[0].replace('buy_', '')}%",))
+            suggestions = [r['strategy_id'] for r in cursor.fetchall()]
+
+            msg = f"Strategy not found: {strategy_id}\n\n"
+            msg += "Expected format: buy_signal1+signal2__sell_signal1+signal2\n"
+            msg += "Example: buy_adm_momentum_rising__sell_adm_acceleration_falling\n"
+            if suggestions:
+                msg += f"\nSimilar strategies found:\n"
+                for s in suggestions:
+                    msg += f"  - {s}\n"
+            msg += "\nUse list_strategy_ids tool to discover valid strategy IDs."
+            return [TextContent(type="text", text=msg)]
 
         buy_signals = json.loads(strategy_row['buy_signals']) if strategy_row['buy_signals'] else []
         sell_signals = json.loads(strategy_row['sell_signals']) if strategy_row['sell_signals'] else []
@@ -866,9 +999,12 @@ async def handle_get_strategy_details(arguments: dict[str, Any]) -> list[TextCon
                 lines.append(f"  Profit Factor: {format_number(row['median_profit_factor'])} | Max DD: {format_pct(row['median_max_drawdown_pct'])}")
                 lines.append(f"  CAGR: {format_pct(row['median_annualized_return'])} | Calmar: {format_number(row['median_calmar_ratio'])}")
                 lines.append(f"  Symbols: {row['symbols_tested']} tested, {row['symbols_profitable']} profitable")
-                lines.append(f"  Consistency: {format_pct(row['consistency_score'], 0)}")
+                lines.append(f"  Consistency: {format_ratio_as_pct(row['consistency_score'])}")
                 if row['median_alpha'] is not None:
                     lines.append(f"  Alpha vs B&H: {format_pct(row['median_alpha'])} (B&H baseline: {format_pct(row['buy_hold_median_return'])})")
+                    risk_adj = row['median_risk_adjusted_alpha'] if 'median_risk_adjusted_alpha' in row.keys() else None
+                    if risk_adj is not None:
+                        lines.append(f"  Risk-Adjusted Alpha: {format_pct(risk_adj)} (accounts for time-in-market)")
 
         return [TextContent(type="text", text="\n".join(lines))]
     finally:
@@ -945,7 +1081,7 @@ async def handle_search_strategies_by_signal(arguments: dict[str, Any]) -> list[
 
             lines.append(f"BUY: {buy_str}")
             lines.append(f"SELL: {sell_str}")
-            lines.append(f"  Expectancy: {format_pct(row['median_expectancy'])} | Win Rate: {format_pct(row['median_win_rate'])} | Consistency: {format_pct(row['consistency_score'], 0)}")
+            lines.append(f"  Expectancy: {format_pct(row['median_expectancy'])} | Win Rate: {format_pct(row['median_win_rate'])} | Consistency: {format_ratio_as_pct(row['consistency_score'])}")
             lines.append("")
 
         return [TextContent(type="text", text="\n".join(lines))]
@@ -976,6 +1112,7 @@ async def handle_compare_strategy_across_periods(arguments: dict[str, Any]) -> l
                 ar.median_annualized_return,
                 ar.median_calmar_ratio,
                 ar.median_alpha,
+                ar.median_risk_adjusted_alpha,
                 ar.symbols_tested,
                 ar.symbols_profitable,
                 ar.symbols_beating_benchmark,
@@ -990,7 +1127,30 @@ async def handle_compare_strategy_across_periods(arguments: dict[str, Any]) -> l
         rows = cursor.fetchall()
 
         if not rows:
-            return [TextContent(type="text", text=f"No results found for strategy: {strategy_id}")]
+            # Check if strategy exists at all
+            cursor.execute("SELECT COUNT(*) as cnt FROM strategies WHERE strategy_id = ?", (strategy_id,))
+            exists = cursor.fetchone()['cnt'] > 0
+
+            if not exists:
+                # Try to suggest similar strategies
+                cursor.execute("""
+                    SELECT strategy_id FROM strategies
+                    WHERE strategy_id LIKE ?
+                    LIMIT 5
+                """, (f"%{strategy_id.split('__')[0].replace('buy_', '')}%",))
+                suggestions = [r['strategy_id'] for r in cursor.fetchall()]
+
+                msg = f"Strategy not found: {strategy_id}\n\n"
+                msg += "Expected format: buy_signal1+signal2__sell_signal1+signal2\n"
+                msg += "Example: buy_adm_momentum_rising__sell_adm_acceleration_falling\n"
+                if suggestions:
+                    msg += f"\nSimilar strategies found:\n"
+                    for s in suggestions:
+                        msg += f"  - {s}\n"
+                msg += "\nUse list_strategy_ids tool to discover valid strategy IDs."
+                return [TextContent(type="text", text=msg)]
+            else:
+                return [TextContent(type="text", text=f"Strategy exists but no results for timing={trade_timing}. Try trade_timing='aggressive'.")]
 
         # Calculate cross-period statistics
         expectancies = [r['median_expectancy'] for r in rows if r['median_expectancy'] is not None]
@@ -1024,8 +1184,13 @@ async def handle_compare_strategy_across_periods(arguments: dict[str, Any]) -> l
             lines.append(f"  B&H Baseline: {format_pct(row['buy_hold_median_return'])}")
             lines.append(f"  Expectancy: {format_pct(row['median_expectancy'])} | Win Rate: {format_pct(row['median_win_rate'])} | PF: {format_number(row['median_profit_factor'])}")
             lines.append(f"  CAGR: {format_pct(row['median_annualized_return'])} | Calmar: {format_number(row['median_calmar_ratio'])} | Max DD: {format_pct(row['median_max_drawdown_pct'])}")
-            lines.append(f"  Alpha: {format_pct(row['median_alpha'])} | Beat B&H: {row['symbols_beating_benchmark'] or 0}/{row['symbols_tested']} ({beat_pct:.0f}%)")
-            lines.append(f"  Consistency: {format_pct(row['consistency_score'], 0)} ({row['symbols_profitable']}/{row['symbols_tested']} profitable)")
+            risk_adj = row['median_risk_adjusted_alpha'] if 'median_risk_adjusted_alpha' in row.keys() else None
+            if risk_adj is not None:
+                lines.append(f"  Alpha: {format_pct(row['median_alpha'])} | Risk-Adj Alpha: {format_pct(risk_adj)}")
+                lines.append(f"  Beat B&H: {row['symbols_beating_benchmark'] or 0}/{row['symbols_tested']} ({beat_pct:.0f}%)")
+            else:
+                lines.append(f"  Alpha: {format_pct(row['median_alpha'])} | Beat B&H: {row['symbols_beating_benchmark'] or 0}/{row['symbols_tested']} ({beat_pct:.0f}%)")
+            lines.append(f"  Consistency: {format_ratio_as_pct(row['consistency_score'])} ({row['symbols_profitable']}/{row['symbols_tested']} profitable)")
 
         return [TextContent(type="text", text="\n".join(lines))]
     finally:
@@ -1094,7 +1259,7 @@ async def handle_find_robust_strategies(arguments: dict[str, Any]) -> list[TextC
             lines.append(f"  SELL: {' + '.join(sell_signals)}")
             lines.append(f"  ─" * 35)
             lines.append(f"  Avg Expectancy: {format_pct(row['avg_expectancy'])} (range: {format_pct(row['min_expectancy'])} to {format_pct(row['max_expectancy'])})")
-            lines.append(f"  Variance: {variance:.2f}% | Avg Win Rate: {format_pct(row['avg_win_rate'])} | Avg Consistency: {format_pct(row['avg_consistency'], 0)}")
+            lines.append(f"  Variance: {variance:.2f}% | Avg Win Rate: {format_pct(row['avg_win_rate'])} | Avg Consistency: {format_ratio_as_pct(row['avg_consistency'])}")
             lines.append(f"  Avg Alpha vs B&H: {format_pct(row['avg_alpha'])}")
             lines.append(f"  Periods: {row['period_details']}")
             lines.append("")
@@ -1234,7 +1399,7 @@ async def handle_find_alpha_generators(arguments: dict[str, Any]) -> list[TextCo
             lines.append(f"  BUY: {' + '.join(buy_signals)}")
             lines.append(f"  SELL: {' + '.join(sell_signals)}")
             lines.append(f"  CAGR: {format_pct(row['median_annualized_return'])} | Calmar: {format_number(row['median_calmar_ratio'])}")
-            lines.append(f"  Beat B&H: {row['symbols_beating_benchmark']}/{row['symbols_tested']} ({beat_pct:.0f}%) | Consistency: {format_pct(row['consistency_score'], 0)}")
+            lines.append(f"  Beat B&H: {row['symbols_beating_benchmark']}/{row['symbols_tested']} ({beat_pct:.0f}%) | Consistency: {format_ratio_as_pct(row['consistency_score'])}")
             lines.append("")
 
         return [TextContent(type="text", text="\n".join(lines))]
@@ -1491,15 +1656,146 @@ async def handle_get_signal_performance_summary(arguments: dict[str, Any]) -> li
         conn.close()
 
 
+async def handle_get_schema(arguments: dict[str, Any]) -> list[TextContent]:
+    """Get database schema information."""
+    table_name = arguments.get("table_name")
+
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+
+        if table_name:
+            # Get schema for specific table
+            cursor.execute(f"PRAGMA table_info({table_name})")
+            columns = cursor.fetchall()
+
+            if not columns:
+                return [TextContent(type="text", text=f"Table not found: {table_name}")]
+
+            lines = [
+                f"Schema for table: {table_name}",
+                "=" * 70,
+                "",
+                f"{'Column':<30} {'Type':<15} {'Nullable':>10} {'PK':>5}",
+                "-" * 70,
+            ]
+
+            for col in columns:
+                nullable = "NULL" if not col['notnull'] else "NOT NULL"
+                pk = "PK" if col['pk'] else ""
+                lines.append(f"{col['name']:<30} {col['type'] or 'ANY':<15} {nullable:>10} {pk:>5}")
+
+            return [TextContent(type="text", text="\n".join(lines))]
+        else:
+            # Get all tables and their schemas
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+            tables = [row['name'] for row in cursor.fetchall()]
+
+            lines = [
+                "Database Schema",
+                "=" * 80,
+                "",
+                f"Tables: {len(tables)}",
+                "",
+            ]
+
+            for tbl in tables:
+                cursor.execute(f"PRAGMA table_info({tbl})")
+                columns = cursor.fetchall()
+
+                lines.append(f"TABLE: {tbl}")
+                lines.append("-" * 40)
+                for col in columns:
+                    nullable = "" if not col['notnull'] else " NOT NULL"
+                    pk = " [PK]" if col['pk'] else ""
+                    lines.append(f"  {col['name']}: {col['type'] or 'ANY'}{nullable}{pk}")
+                lines.append("")
+
+            # Also show common column mappings for JOINs
+            lines.append("=" * 80)
+            lines.append("Common JOIN Patterns:")
+            lines.append("-" * 40)
+            lines.append("  search_runs.id = aggregated_results.search_run_id")
+            lines.append("  search_runs.id = symbol_results.search_run_id")
+            lines.append("  strategies.strategy_id = aggregated_results.strategy_id")
+            lines.append("  strategies.strategy_id = symbol_results.strategy_id")
+            lines.append("")
+            lines.append("Strategy ID Format:")
+            lines.append("  buy_signal1+signal2__sell_signal1+signal2")
+            lines.append("  Example: buy_adm_momentum_rising__sell_adm_acceleration_falling")
+
+            return [TextContent(type="text", text="\n".join(lines))]
+    finally:
+        conn.close()
+
+
+async def handle_list_strategy_ids(arguments: dict[str, Any]) -> list[TextContent]:
+    """List strategy IDs with optional pattern filtering."""
+    pattern = arguments.get("pattern")
+    limit = arguments.get("limit", 50)
+
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+
+        if pattern:
+            cursor.execute("""
+                SELECT strategy_id, buy_signals, sell_signals
+                FROM strategies
+                WHERE strategy_id LIKE ?
+                ORDER BY strategy_id
+                LIMIT ?
+            """, (f"%{pattern}%", limit))
+        else:
+            cursor.execute("""
+                SELECT strategy_id, buy_signals, sell_signals
+                FROM strategies
+                ORDER BY strategy_id
+                LIMIT ?
+            """, (limit,))
+
+        rows = cursor.fetchall()
+
+        if not rows:
+            return [TextContent(type="text", text=f"No strategy IDs found" + (f" matching '{pattern}'" if pattern else ""))]
+
+        lines = [
+            f"Strategy IDs" + (f" matching '{pattern}'" if pattern else ""),
+            "=" * 80,
+            "",
+            "Format: buy_signal1+signal2__sell_signal1+signal2",
+            "",
+            f"Found {len(rows)} strategies:",
+            "-" * 80,
+            ""
+        ]
+
+        for row in rows:
+            buy_signals = json.loads(row['buy_signals']) if row['buy_signals'] else []
+            sell_signals = json.loads(row['sell_signals']) if row['sell_signals'] else []
+
+            lines.append(f"ID: {row['strategy_id']}")
+            lines.append(f"    BUY:  {' + '.join(buy_signals)}")
+            lines.append(f"    SELL: {' + '.join(sell_signals)}")
+            lines.append("")
+
+        return [TextContent(type="text", text="\n".join(lines))]
+    finally:
+        conn.close()
+
+
 async def handle_run_custom_query(arguments: dict[str, Any]) -> list[TextContent]:
     """Execute a custom SQL query."""
     query = arguments["query"]
     limit = min(arguments.get("limit", 100), 500)
 
-    # Basic safety check - only allow SELECT
+    # Basic safety check - only allow SELECT and PRAGMA (read-only)
     query_upper = query.strip().upper()
-    if not query_upper.startswith("SELECT"):
-        return [TextContent(type="text", text="Error: Only SELECT queries are allowed.")]
+    is_pragma = query_upper.startswith("PRAGMA")
+    is_select = query_upper.startswith("SELECT")
+
+    if not (is_select or is_pragma):
+        return [TextContent(type="text", text="Error: Only SELECT queries and PRAGMA commands are allowed.")]
 
     # Disallow potentially dangerous operations
     forbidden = ['INSERT', 'UPDATE', 'DELETE', 'DROP', 'ALTER', 'CREATE', 'TRUNCATE', 'EXEC', 'EXECUTE']
@@ -1511,8 +1807,8 @@ async def handle_run_custom_query(arguments: dict[str, Any]) -> list[TextContent
     try:
         cursor = conn.cursor()
 
-        # Add LIMIT if not present
-        if 'LIMIT' not in query_upper:
+        # Add LIMIT if not present (only for SELECT, not PRAGMA)
+        if is_select and 'LIMIT' not in query_upper:
             query = f"{query.rstrip(';')} LIMIT {limit}"
 
         cursor.execute(query)
@@ -1630,7 +1926,7 @@ async def handle_compare_timing_modes(arguments: dict[str, Any]) -> list[TextCon
                 lines.append(f"  {'Calmar Ratio':<20} {format_number(row['cons_calmar']):>12} {format_number(row['aggr_calmar']):>12} {calmar_delta:>+11.2f}")
                 lines.append(f"  {'Alpha vs B&H':<20} {format_pct(row['cons_alpha']):>12} {format_pct(row['aggr_alpha']):>12}")
                 lines.append(f"  {'Trades/Year':<20} {format_number(row['cons_trades_per_year']):>12} {format_number(row['aggr_trades_per_year']):>12}")
-                lines.append(f"  {'Consistency':<20} {format_pct(row['cons_consistency'], 0):>12} {format_pct(row['aggr_consistency'], 0):>12}")
+                lines.append(f"  {'Consistency':<20} {format_ratio_as_pct(row['cons_consistency']):>12} {format_ratio_as_pct(row['aggr_consistency']):>12}")
                 lines.append("")
 
             return [TextContent(type="text", text="\n".join(lines))]
@@ -1718,6 +2014,417 @@ async def handle_compare_timing_modes(arguments: dict[str, Any]) -> list[TextCon
                 lines.append(f"    Delta: Expectancy {delta_str} | Win Rate {(row['win_rate_delta'] or 0):>+.1f}%")
 
             return [TextContent(type="text", text="\n".join(lines))]
+    finally:
+        conn.close()
+
+
+async def handle_get_capital_deployment_analysis(arguments: dict[str, Any]) -> list[TextContent]:
+    """Analyze portfolio-level capital deployment for a strategy."""
+    strategy_id = arguments["strategy_id"]
+    compare_strategy_id = arguments.get("compare_strategy_id")
+    trade_timing = arguments.get("trade_timing", "conservative")
+    run_id = arguments.get("run_id")
+
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+
+        def get_strategy_deployment(strat_id: str) -> list[dict]:
+            """Get deployment stats for a single strategy across periods."""
+            query = """
+                SELECT
+                    sr.period_name,
+                    sr.start_date,
+                    sr.end_date,
+                    sr.years_duration,
+                    ar.symbols_tested,
+                    ar.median_time_in_market_pct,
+                    ar.median_avg_trades_per_year,
+                    ar.median_expectancy,
+                    ar.median_annualized_return,
+                    ar.median_alpha,
+                    ar.consistency_score
+                FROM aggregated_results ar
+                JOIN search_runs sr ON ar.search_run_id = sr.id
+                WHERE ar.strategy_id = ?
+                  AND ar.trade_timing = ?
+            """
+            params = [strat_id, trade_timing]
+
+            if run_id:
+                query += " AND ar.search_run_id = ?"
+                params.append(run_id)
+
+            query += " ORDER BY sr.start_date"
+
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+
+            results = []
+            for row in rows:
+                symbols = row['symbols_tested'] or 0
+                time_in_market = row['median_time_in_market_pct'] or 0
+
+                # Estimated average simultaneous positions
+                # If 100 symbols and 25% time-in-market, expect ~25 positions on average
+                est_positions = symbols * time_in_market / 100 if symbols > 0 else 0
+
+                results.append({
+                    'period': row['period_name'] or 'Custom',
+                    'start_date': row['start_date'],
+                    'end_date': row['end_date'],
+                    'years': row['years_duration'],
+                    'symbols_tested': symbols,
+                    'time_in_market_pct': time_in_market,
+                    'est_avg_positions': est_positions,
+                    'trades_per_year': row['median_avg_trades_per_year'],
+                    'expectancy': row['median_expectancy'],
+                    'cagr': row['median_annualized_return'],
+                    'alpha': row['median_alpha'],
+                    'consistency': row['consistency_score']
+                })
+
+            return results
+
+        # Get strategy info
+        cursor.execute("SELECT buy_signals, sell_signals FROM strategies WHERE strategy_id = ?", (strategy_id,))
+        strat_row = cursor.fetchone()
+        if not strat_row:
+            return [TextContent(type="text", text=f"Strategy not found: {strategy_id}\n\nUse list_strategy_ids tool to discover valid strategy IDs.")]
+
+        buy_signals = json.loads(strat_row['buy_signals']) if strat_row['buy_signals'] else []
+        sell_signals = json.loads(strat_row['sell_signals']) if strat_row['sell_signals'] else []
+
+        primary_data = get_strategy_deployment(strategy_id)
+
+        if not primary_data:
+            return [TextContent(type="text", text=f"No deployment data found for strategy: {strategy_id} with timing={trade_timing}")]
+
+        lines = [
+            "Capital Deployment Analysis",
+            "=" * 90,
+            "",
+            f"Primary Strategy: {strategy_id}",
+            f"  BUY:  {' + '.join(buy_signals)}",
+            f"  SELL: {' + '.join(sell_signals)}",
+            f"  Trade Timing: {trade_timing}",
+            "",
+        ]
+
+        # Calculate summary statistics
+        avg_time_in_market = statistics.mean([d['time_in_market_pct'] for d in primary_data])
+        avg_est_positions = statistics.mean([d['est_avg_positions'] for d in primary_data])
+        total_symbols = primary_data[0]['symbols_tested']  # Assume consistent across periods
+
+        lines.append("Summary Across All Periods:")
+        lines.append(f"  Average Time-in-Market: {avg_time_in_market:.1f}%")
+        lines.append(f"  Estimated Avg Positions: {avg_est_positions:.1f} (of {total_symbols} symbols)")
+        lines.append(f"  Capital Utilization: ~{avg_est_positions/total_symbols*100:.0f}% of portfolio capacity")
+        lines.append("")
+
+        # If comparison strategy is provided
+        compare_data = None
+        if compare_strategy_id:
+            cursor.execute("SELECT buy_signals, sell_signals FROM strategies WHERE strategy_id = ?", (compare_strategy_id,))
+            comp_row = cursor.fetchone()
+            if comp_row:
+                compare_data = get_strategy_deployment(compare_strategy_id)
+                comp_buy = json.loads(comp_row['buy_signals']) if comp_row['buy_signals'] else []
+                comp_sell = json.loads(comp_row['sell_signals']) if comp_row['sell_signals'] else []
+
+                lines.append(f"Comparison Strategy: {compare_strategy_id}")
+                lines.append(f"  BUY:  {' + '.join(comp_buy)}")
+                lines.append(f"  SELL: {' + '.join(comp_sell)}")
+                lines.append("")
+
+                if compare_data:
+                    comp_avg_time = statistics.mean([d['time_in_market_pct'] for d in compare_data])
+                    comp_avg_positions = statistics.mean([d['est_avg_positions'] for d in compare_data])
+
+                    lines.append("Comparison Summary:")
+                    lines.append(f"  Average Time-in-Market: {comp_avg_time:.1f}%")
+                    lines.append(f"  Estimated Avg Positions: {comp_avg_positions:.1f}")
+                    lines.append("")
+
+                    # Deployment advantage
+                    deployment_ratio = avg_est_positions / comp_avg_positions if comp_avg_positions > 0 else float('inf')
+                    if deployment_ratio > 1:
+                        lines.append(f"  >> Primary deploys {deployment_ratio:.1f}x MORE capital than Comparison")
+                    else:
+                        lines.append(f"  >> Comparison deploys {1/deployment_ratio:.1f}x MORE capital than Primary")
+                    lines.append("")
+
+        # Period-by-period breakdown
+        lines.append("-" * 90)
+        lines.append("Period-by-Period Breakdown:")
+        lines.append("")
+
+        if compare_data:
+            # Side-by-side comparison table
+            lines.append(f"{'Period':<25} {'Primary TiM':>12} {'Primary Pos':>12} {'Comp TiM':>12} {'Comp Pos':>12} {'Ratio':>8}")
+            lines.append("-" * 90)
+
+            # Match periods by name
+            comp_by_period = {d['period']: d for d in compare_data}
+
+            for p in primary_data:
+                comp_p = comp_by_period.get(p['period'])
+                if comp_p:
+                    ratio = p['est_avg_positions'] / comp_p['est_avg_positions'] if comp_p['est_avg_positions'] > 0 else float('inf')
+                    ratio_str = f"{ratio:.1f}x" if ratio != float('inf') else "N/A"
+                    lines.append(
+                        f"{p['period']:<25} "
+                        f"{p['time_in_market_pct']:>11.1f}% "
+                        f"{p['est_avg_positions']:>12.1f} "
+                        f"{comp_p['time_in_market_pct']:>11.1f}% "
+                        f"{comp_p['est_avg_positions']:>12.1f} "
+                        f"{ratio_str:>8}"
+                    )
+                else:
+                    lines.append(
+                        f"{p['period']:<25} "
+                        f"{p['time_in_market_pct']:>11.1f}% "
+                        f"{p['est_avg_positions']:>12.1f} "
+                        f"{'N/A':>12} "
+                        f"{'N/A':>12} "
+                        f"{'N/A':>8}"
+                    )
+
+            lines.append("")
+            lines.append("(Ratio = Primary positions / Comparison positions)")
+        else:
+            # Single strategy detailed breakdown
+            lines.append(f"{'Period':<25} {'TiM %':>10} {'Est Pos':>10} {'Trades/Yr':>10} {'Expect':>10} {'CAGR':>10} {'Alpha':>10}")
+            lines.append("-" * 90)
+
+            for p in primary_data:
+                lines.append(
+                    f"{p['period']:<25} "
+                    f"{p['time_in_market_pct']:>9.1f}% "
+                    f"{p['est_avg_positions']:>10.1f} "
+                    f"{format_number(p['trades_per_year']):>10} "
+                    f"{format_pct(p['expectancy']):>10} "
+                    f"{format_pct(p['cagr']):>10} "
+                    f"{format_pct(p['alpha']):>10}"
+                )
+
+        lines.append("")
+        lines.append("Interpretation:")
+        lines.append("  - Time-in-Market (TiM): % of trading days with an active position (per symbol)")
+        lines.append("  - Est Pos: Estimated simultaneous positions = symbols × TiM%")
+        lines.append("  - Higher TiM = more capital deployed = more exposure to market moves")
+
+        return [TextContent(type="text", text="\n".join(lines))]
+    finally:
+        conn.close()
+
+
+async def handle_get_daily_position_counts(arguments: dict[str, Any]) -> list[TextContent]:
+    """Get daily position counts from trade-level data for time-series graphing."""
+    strategy_id = arguments["strategy_id"]
+    run_id = arguments["run_id"]
+    trade_timing = arguments.get("trade_timing", "conservative")
+    compare_strategy_id = arguments.get("compare_strategy_id")
+    output_format = arguments.get("output_format", "summary")
+
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+
+        # Check if trade_results table exists
+        cursor.execute("""
+            SELECT name FROM sqlite_master
+            WHERE type='table' AND name='trade_results'
+        """)
+        if not cursor.fetchone():
+            return [TextContent(type="text", text=(
+                "Trade-level data not available.\n\n"
+                "The trade_results table doesn't exist yet. This feature requires:\n"
+                "1. Strategy search runs performed after Dec 2025\n"
+                "2. Re-running existing searches to populate trade data\n\n"
+                "Use get_capital_deployment_analysis for estimated position counts from aggregated data."
+            ))]
+
+        def get_position_counts(strat_id: str) -> dict:
+            """Get position counts for a strategy."""
+            # Get all trades for this strategy/run/timing
+            cursor.execute("""
+                SELECT entry_date, exit_date, symbol_code
+                FROM trade_results
+                WHERE search_run_id = ?
+                  AND strategy_id = ?
+                  AND trade_timing = ?
+                ORDER BY entry_date
+            """, (run_id, strat_id, trade_timing))
+            trades = cursor.fetchall()
+
+            if not trades:
+                return {'trades': [], 'daily_counts': {}, 'stats': {}}
+
+            # Build daily position counts
+            from datetime import datetime, timedelta
+
+            # Get date range from trades
+            all_entry_dates = [t['entry_date'][:10] for t in trades]
+            all_exit_dates = [t['exit_date'][:10] for t in trades]
+            min_date = min(all_entry_dates)
+            max_date = max(all_exit_dates)
+
+            # Generate all trading days in range
+            start_dt = datetime.strptime(min_date, '%Y-%m-%d')
+            end_dt = datetime.strptime(max_date, '%Y-%m-%d')
+
+            daily_counts = {}
+            current_dt = start_dt
+            while current_dt <= end_dt:
+                date_str = current_dt.strftime('%Y-%m-%d')
+                # Count positions open on this date
+                count = sum(
+                    1 for t in trades
+                    if t['entry_date'][:10] <= date_str <= t['exit_date'][:10]
+                )
+                daily_counts[date_str] = count
+                current_dt += timedelta(days=1)
+
+            # Calculate statistics
+            counts = list(daily_counts.values())
+            non_zero_counts = [c for c in counts if c > 0]
+
+            stats = {
+                'total_days': len(counts),
+                'days_with_positions': len(non_zero_counts),
+                'days_at_zero': counts.count(0),
+                'mean_positions': statistics.mean(counts) if counts else 0,
+                'median_positions': statistics.median(counts) if counts else 0,
+                'max_positions': max(counts) if counts else 0,
+                'min_positions': min(counts) if counts else 0,
+                'pct_days_at_zero': (counts.count(0) / len(counts) * 100) if counts else 0,
+            }
+            if non_zero_counts:
+                stats['mean_when_invested'] = statistics.mean(non_zero_counts)
+
+            return {
+                'trades': trades,
+                'daily_counts': daily_counts,
+                'stats': stats
+            }
+
+        # Get primary strategy data
+        primary = get_position_counts(strategy_id)
+
+        if not primary['trades']:
+            return [TextContent(type="text", text=(
+                f"No trade data found for strategy: {strategy_id}\n"
+                f"Run ID: {run_id}, Timing: {trade_timing}\n\n"
+                "This could mean:\n"
+                "1. The strategy had no trades in this period\n"
+                "2. Trade-level data wasn't stored for this run (pre-Dec 2025)\n"
+                "3. Wrong strategy_id or run_id"
+            ))]
+
+        # Get comparison strategy if requested
+        compare = None
+        if compare_strategy_id:
+            compare = get_position_counts(compare_strategy_id)
+
+        # Build output
+        lines = [
+            "Daily Position Count Analysis",
+            "=" * 80,
+            "",
+            f"Strategy: {strategy_id}",
+            f"Run ID: {run_id}",
+            f"Trade Timing: {trade_timing}",
+            "",
+            "Position Count Statistics:",
+            f"  Total Trading Days: {primary['stats']['total_days']}",
+            f"  Days with Positions: {primary['stats']['days_with_positions']}",
+            f"  Days at Zero: {primary['stats']['days_at_zero']} ({primary['stats']['pct_days_at_zero']:.1f}%)",
+            f"  Mean Positions/Day: {primary['stats']['mean_positions']:.1f}",
+            f"  Median Positions/Day: {primary['stats']['median_positions']:.0f}",
+            f"  Max Concurrent Positions: {primary['stats']['max_positions']}",
+        ]
+
+        if 'mean_when_invested' in primary['stats']:
+            lines.append(f"  Mean When Invested: {primary['stats']['mean_when_invested']:.1f}")
+
+        # Add comparison if available
+        if compare and compare['trades']:
+            lines.append("")
+            lines.append(f"Comparison Strategy: {compare_strategy_id}")
+            lines.append(f"  Days with Positions: {compare['stats']['days_with_positions']}")
+            lines.append(f"  Days at Zero: {compare['stats']['days_at_zero']} ({compare['stats']['pct_days_at_zero']:.1f}%)")
+            lines.append(f"  Mean Positions/Day: {compare['stats']['mean_positions']:.1f}")
+            lines.append(f"  Max Concurrent: {compare['stats']['max_positions']}")
+
+            # Ratio comparison
+            if compare['stats']['mean_positions'] > 0:
+                ratio = primary['stats']['mean_positions'] / compare['stats']['mean_positions']
+                lines.append(f"  >> Primary deploys {ratio:.1f}x {'MORE' if ratio > 1 else 'LESS'} capital")
+
+        # Add time-series data if requested
+        if output_format == 'daily':
+            lines.append("")
+            lines.append("-" * 80)
+            lines.append("Daily Position Counts (last 60 days):")
+            lines.append("")
+
+            if compare and compare['trades']:
+                lines.append(f"{'Date':<12} {'Primary':>10} {'Compare':>10} {'Diff':>10}")
+                lines.append("-" * 50)
+            else:
+                lines.append(f"{'Date':<12} {'Positions':>10}")
+                lines.append("-" * 25)
+
+            # Show last 60 days
+            sorted_dates = sorted(primary['daily_counts'].keys(), reverse=True)[:60]
+            for date in reversed(sorted_dates):
+                p_count = primary['daily_counts'].get(date, 0)
+                if compare and compare['trades']:
+                    c_count = compare['daily_counts'].get(date, 0)
+                    diff = p_count - c_count
+                    lines.append(f"{date:<12} {p_count:>10} {c_count:>10} {diff:>+10}")
+                else:
+                    lines.append(f"{date:<12} {p_count:>10}")
+
+        elif output_format == 'weekly':
+            lines.append("")
+            lines.append("-" * 80)
+            lines.append("Weekly Average Position Counts:")
+            lines.append("")
+
+            # Group by week
+            from collections import defaultdict
+            weekly = defaultdict(list)
+            for date, count in primary['daily_counts'].items():
+                dt = datetime.strptime(date, '%Y-%m-%d')
+                week_start = (dt - timedelta(days=dt.weekday())).strftime('%Y-%m-%d')
+                weekly[week_start].append(count)
+
+            if compare and compare['trades']:
+                compare_weekly = defaultdict(list)
+                for date, count in compare['daily_counts'].items():
+                    dt = datetime.strptime(date, '%Y-%m-%d')
+                    week_start = (dt - timedelta(days=dt.weekday())).strftime('%Y-%m-%d')
+                    compare_weekly[week_start].append(count)
+
+                lines.append(f"{'Week Start':<12} {'Primary Avg':>12} {'Compare Avg':>12}")
+                lines.append("-" * 40)
+                for week in sorted(weekly.keys()):
+                    p_avg = statistics.mean(weekly[week])
+                    c_avg = statistics.mean(compare_weekly.get(week, [0])) if compare_weekly else 0
+                    lines.append(f"{week:<12} {p_avg:>12.1f} {c_avg:>12.1f}")
+            else:
+                lines.append(f"{'Week Start':<12} {'Avg Positions':>15}")
+                lines.append("-" * 30)
+                for week in sorted(weekly.keys()):
+                    avg = statistics.mean(weekly[week])
+                    lines.append(f"{week:<12} {avg:>15.1f}")
+
+        lines.append("")
+        lines.append("Note: Position count = number of symbols with open positions on each day")
+
+        return [TextContent(type="text", text="\n".join(lines))]
     finally:
         conn.close()
 
