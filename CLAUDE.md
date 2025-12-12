@@ -9,16 +9,16 @@ This is a Model Context Protocol (MCP) server that provides intelligent analysis
 ## Prerequisites
 
 - Python 3.10+
-- Access to strategy_search.db (path set via `STRATEGY_DB_PATH` environment variable)
+- Access to strategy_research.db (path set via `STRATEGY_DB_PATH` environment variable)
 
 ## Environment Variables
 
 ```bash
 # Required: Path to the SQLite strategy research database
-export STRATEGY_DB_PATH=/path/to/cache/strategy_search.db
+export STRATEGY_DB_PATH=/path/to/cache/strategy_research.db
 
 # Example typical location (from trading-lab project)
-export STRATEGY_DB_PATH=/Volumes/Work/development/projects/git/trading-lab/cache/strategy_search.db
+export STRATEGY_DB_PATH=/Volumes/Work/development/projects/git/trading-lab/cache/strategy_research.db
 ```
 
 ## Development Setup
@@ -47,7 +47,7 @@ claude --mcp-debug
 
 The server (`strategy_research_mcp_server.py`) is a single-file MCP server using `mcp.server` with direct SQLite queries for maximum flexibility.
 
-### Tools (14 total)
+### Tools (17 total)
 
 **Database Overview:**
 - `get_database_status`: Overview statistics (runs, strategies, symbols)
@@ -61,19 +61,25 @@ The server (`strategy_research_mcp_server.py`) is a single-file MCP server using
 
 **Robustness Analysis:**
 - `find_robust_strategies`: Strategies that work across ALL periods
-- `get_period_summary`: Summary statistics per period
+- `get_benchmark_comparison`: Compare strategies vs Buy & Hold
 
 **Benchmark Comparison:**
 - `find_alpha_generators`: Strategies beating Buy & Hold
 - `get_risk_adjusted_rankings`: Calmar ratio rankings
 
 **Symbol Analysis:**
-- `get_symbol_performance`: Per-symbol performance breakdown
-- `find_best_symbols_for_strategy`: Best symbols for a strategy
+- `get_strategy_symbol_breakdown`: Per-symbol performance breakdown
+- `get_signal_performance_summary`: Aggregate performance by signal type
+
+**Capital Deployment Analysis:**
+- `get_capital_deployment_analysis`: Portfolio capital utilization across periods
+- `get_daily_position_counts`: Exact daily position counts (requires Dec 2025+ data)
+- `compare_timing_modes`: Compare Conservative vs Aggressive timing
 
 **Advanced:**
 - `run_custom_query`: Custom SQL (read-only)
-- `get_schema_info`: Database schema documentation
+- `get_schema`: Database schema documentation
+- `list_strategy_ids`: List strategy IDs with pattern filtering
 
 ### Resources
 
@@ -82,7 +88,7 @@ The server (`strategy_research_mcp_server.py`) is a single-file MCP server using
 
 ## Database Schema
 
-The SQLite database contains three key tables:
+The SQLite database contains four key tables:
 
 ### search_runs
 ```sql
@@ -103,7 +109,7 @@ The SQLite database contains three key tables:
 - median_*: MEDIAN metrics across all symbols
   - expectancy, win_rate, profit_factor
   - annualized_return, cagr, calmar_ratio
-  - max_drawdown_pct, sharpe_ratio
+  - max_drawdown_pct, time_in_market_pct
   - alpha (vs Buy & Hold)
 - consistency_score: % symbols profitable
 - symbols_beating_benchmark: Count
@@ -114,6 +120,15 @@ The SQLite database contains three key tables:
 - Per-symbol detailed backtest results
 - Includes all trade-level metrics
 - Links to search_run via search_run_id
+```
+
+### trade_results (Dec 2025+)
+```sql
+- Individual trade records for position count analysis
+- entry_date, exit_date: Trade duration for daily position counting
+- strategy_id, symbol_code, trade_timing: Identifies the trade
+- pnl_pct, duration_days: Trade performance
+- Enables exact portfolio-level capital deployment tracking
 ```
 
 ## Key Concepts
