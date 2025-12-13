@@ -2395,6 +2395,7 @@ async def handle_get_daily_position_counts(arguments: dict[str, Any]) -> list[Te
 
             # Group by week
             from collections import defaultdict
+            from datetime import timedelta
             weekly = defaultdict(list)
             for date, count in primary['daily_counts'].items():
                 dt = datetime.strptime(date, '%Y-%m-%d')
